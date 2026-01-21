@@ -32,26 +32,6 @@ PROVIDERS = {
     "optimism": "https://mainnet.optimism.io",
 }
 
-# Adresses connues de Factory/Router des plateformes BASE
-PLATFORM_ADDRESSES = {
-    "uniswap_v2_router": "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24",
-    "uniswap_v3_factory": "0x33128a8fc17869897dce68ed026d694621f6fdfd",
-    "aerodrome": "0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43",
-    "baseswap": "0x327df1e6de05895d2ab08513aadd9313fe505d86",
-    "sushiswap": "0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891",
-    "pancakeswap": "0x02a84c5b5a2d569e2a1e1e18d1d42f7e4b2f1e1e",
-}
-
-# Plateformes de lancement sur BASE
-LAUNCHPAD_PLATFORMS = [
-    {"name": "Clanker", "url_template": "https://www.clanker.world/clanker/{address}"},
-    {"name": "Zora", "url_template": "https://zora.co/collect/base:{address}"},
-    {"name": "Ape.store", "url_template": "https://ape.store/base/{address}"},
-    {"name": "Klik", "url_template": "https://klik.network/token/{address}"},
-    {"name": "WOW", "url_template": "https://wow.xyz/token/base/{address}"},
-    {"name": "Base.app", "url_template": "https://base.app/token/{address}"},
-]
-
 class TokenAnalyzer:
     def __init__(self):
         self.session = None
@@ -104,43 +84,165 @@ class TokenAnalyzer:
             logger.error(f"Erreur get_token_info: {e}")
             return {"error": str(e)}
     
-    async def detect_platform(self, address: str, chain: str) -> List[Dict]:
-        """Détecte les plateformes où le token est présent"""
-        detected = []
-        
-        # Check sur les launchpads connus
-        for platform in LAUNCHPAD_PLATFORMS:
-            url = platform["url_template"].format(address=address)
-            try:
-                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    # On vérifie juste si la page existe et retourne 200
-                    if resp.status == 200:
-                        content = await resp.text()
-                        # Vérification basique qu'il y a du contenu pertinent
-                        if len(content) > 1000:  # Page avec du contenu
-                            detected.append({
-                                "name": platform["name"],
-                                "url": url
-                            })
-            except Exception as e:
-                logger.debug(f"Platform {platform['name']} check failed: {e}")
-                continue
-        
-        # Toujours ajouter Uniswap et DEXScreener comme fallback
-        detected.append({
-            "name": "Uniswap",
-            "url": f"https://app.uniswap.org/explore/tokens/{chain}/{address}"
-        })
-        
-        return detected
+    async def detect_creation_platform(self, address: str, chain: str) -> Optional[Dict]:
+        """Détecte la plateforme de création du token en analysant les transactions"""
+        try:
+            # Récupérer les premières transactions du contrat
+            if chain == "base":
+                url = f"https://api.basescan.org/api"
+                api_key = BASESCAN_API_KEY
+            else:
+                return None
+            
+            params = {
+                "module": "account",
+                "action": "txlist",
+                "address": address,
+                "startblock": 0,
+                "endblock": 99999999,
+                "page": 1,
+                "offset": 50,
+                "sort": "asc",
+                "apikey": api_key
+            }
+            
+            async with self.session.get(url, params=params) as resp:
+                data = await resp.json()
+                
+                if data.get("status") != "1":
+                    return None
+                
+                transactions = data.get("result", [])
+                if not transactions:
+                    return None
+                
+                # Analyser les premières transactions pour détecter la plateforme
+                for tx in transactions[:10]:  # Regarder les 10 premières tx
+                    tx_from = tx.get("from", "").lower()
+                    tx_input = tx.get("input", "")
+                    
+                    # Vérifier si c'est Clanker
+                    if await self._check_clanker(address):
+                        return {
+                            "name": "Clanker",
+                            "url": f"https://www.clanker.world/clanker/{address}"
+                        }
+                    
+                    # Vérifier si c'est Zora
+                    if "0x777777" in tx_from or "zora" in tx_input.lower():
+                        return {
+                            "name": "Zora",
+                            "url": f"https://zora.co/collect/base:{address}"
+                        }
+                    
+                    # Vérifier si c'est Ape.store
+                    if await self._check_ape_store(address):
+                        return {
+                            "name": "Ape.store",
+                            "url": f"https://ape.store/base/{address}"
+                        }
+                    
+                    # Vérifier si c'est Klik
+                    if await self._check_klik(address):
+                        return {
+                            "name": "Klik",
+                            "url": f"https://klik.network/token/{address}"
+                        }
+                    
+                    # Vérifier si c'est WOW
+                    if await self._check_wow(address):
+                        return {
+                            "name": "WOW",
+                            "url": f"https://wow.xyz/token/base/{address}"
+                        }
+                
+                # Si rien n'est détecté, vérifier Uniswap par défaut
+                if await self._check_uniswap(address, chain):
+                    return {
+                        "name": "Uniswap",
+                        "url": f"https://app.uniswap.org/explore/tokens/{chain}/{address}"
+                    }
+                
+                return None
+                
+        except Exception as e:
+            logger.error(f"Erreur detect_creation_platform: {e}")
+            return None
+    
+    async def _check_clanker(self, address: str) -> bool:
+        """Vérifie si le token est sur Clanker"""
+        try:
+            url = f"https://www.clanker.world/api/tokens/{address}"
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return bool(data)
+        except:
+            pass
+        return False
+    
+    async def _check_ape_store(self, address: str) -> bool:
+        """Vérifie si le token est sur Ape.store"""
+        try:
+            url = f"https://ape.store/api/token/base/{address}"
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                return resp.status == 200
+        except:
+            pass
+        return False
+    
+    async def _check_klik(self, address: str) -> bool:
+        """Vérifie si le token est sur Klik"""
+        try:
+            url = f"https://klik.network/api/token/{address}"
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                return resp.status == 200
+        except:
+            pass
+        return False
+    
+    async def _check_wow(self, address: str) -> bool:
+        """Vérifie si le token est sur WOW"""
+        try:
+            url = f"https://wow.xyz/api/token/base/{address}"
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                return resp.status == 200
+        except:
+            pass
+        return False
+    
+    async def _check_uniswap(self, address: str, chain: str) -> bool:
+        """Vérifie si le token a une pool Uniswap"""
+        try:
+            # Utilise l'API Uniswap v3 subgraph pour Base
+            subgraph_url = "https://api.studio.thegraph.com/query/48211/uniswap-v3-base/version/latest"
+            
+            query = """
+            {
+              token(id: "%s") {
+                id
+                symbol
+                name
+              }
+            }
+            """ % address.lower()
+            
+            async with self.session.post(
+                subgraph_url,
+                json={"query": query},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                data = await resp.json()
+                return bool(data.get("data", {}).get("token"))
+        except:
+            pass
+        return False
     
     async def search_social_mentions(self, ticker: str) -> List[str]:
         """Recherche les mentions du ticker sur les réseaux sociaux"""
         mentions = []
-        
         mentions.append(f"🔍 [Twitter/X](https://twitter.com/search?q=%24{ticker}&f=live)")
         mentions.append(f"🔍 [Farcaster](https://warpcast.com/~/search?q=%24{ticker})")
-        
         return mentions
     
     async def get_contract_creation_tx(self, token_address: str, chain: str) -> Optional[Dict]:
@@ -325,19 +427,13 @@ class TokenAnalyzer:
             result += f"❌ Impossible de récupérer les infos du token\n\n"
             ticker = "UNKNOWN"
         
-        # Détection de la plateforme (simplifiée - ne vérifie plus activement)
-        result += "🌐 **LIENS RAPIDES**\n"
-        result += f"• [DEXScreener](https://dexscreener.com/{chain}/{address})\n"
-        result += f"• [GMGN](https://gmgn.ai/sol/token/{address})\n"
-        result += f"• [Basescan](https://basescan.org/token/{address})\n"
-        result += f"• [Uniswap](https://app.uniswap.org/explore/tokens/{chain}/{address})\n\n"
-        
-        # Launchpads potentiels
-        result += "🚀 **LAUNCHPADS POSSIBLES**\n"
-        for platform in LAUNCHPAD_PLATFORMS:
-            url = platform["url_template"].format(address=address)
-            result += f"• [{platform['name']}]({url})\n"
-        result += "\n"
+        # Détection de la plateforme de création
+        result += "🌐 **PLATEFORME DE CRÉATION**\n"
+        platform = await self.detect_creation_platform(address, chain)
+        if platform:
+            result += f"• Créé sur: [{platform['name']}]({platform['url']})\n\n"
+        else:
+            result += "• Plateforme non détectée (déploiement manuel ou plateforme inconnue)\n\n"
         
         # Mentions sociales
         result += f"💬 **RECHERCHE SOCIALE (${ticker})**\n"
@@ -386,7 +482,8 @@ class TokenAnalyzer:
             else:
                 result += "• Wallet auto-financé ou données non disponibles\n"
         else:
-            result += "• Informations du déployeur non disponibles sur cette chaîne\n"
+            # Si pas d'infos du déployeur, on met juste un lien vers Basescan
+            result += f"• [Voir les détails sur Basescan](https://basescan.org/token/{address})\n"
         
         # Créer les boutons
         buttons = self.create_buttons(address, chain)
@@ -402,7 +499,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Envoyez-moi une adresse de contrat BASE et je vais analyser :
 
 ✅ Informations du token (nom, symbole, supply)
-✅ Liens vers toutes les plateformes (DEXScreener, GMGN, Basescan, etc.)
+✅ Plateforme de création (Clanker, Zora, Ape.store, Klik, WOW, Uniswap...)
 ✅ Recherche sociale du ticker
 ✅ Historique du déployeur (tokens précédents)
 ✅ Analyse du wallet de financement
@@ -432,7 +529,7 @@ async def analyze_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     address = matches[0]
     
     # Message de chargement
-    loading_msg = await update.message.reply_text("🔄 Analyse en cours... Cela peut prendre 10-20 secondes.")
+    loading_msg = await update.message.reply_text("🔄 Analyse en cours... Cela peut prendre 15-30 secondes.")
     
     # Analyse
     analyzer = TokenAnalyzer()
