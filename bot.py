@@ -391,7 +391,7 @@ class TokenAnalyzer:
         keyboard = [
             [
                 InlineKeyboardButton("📊 DEXScreener", url=f"https://dexscreener.com/{chain}/{address}"),
-                InlineKeyboardButton("📈 GMGN", url=f"https://gmgn.ai/sol/token/{address}")
+                InlineKeyboardButton("📈 GMGN", url=f"https://gmgn.ai/base/token/{address}")
             ],
             [
                 InlineKeyboardButton("🔍 Basescan", url=f"https://basescan.org/token/{address}"),
@@ -562,3 +562,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
